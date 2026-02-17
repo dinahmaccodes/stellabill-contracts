@@ -1,0 +1,21 @@
+[package]
+name = "subscription_vault"
+version = "0.1.0"
+edition = "2021"
+description = "Stellarbill prepaid subscription vault - recurring USDC billing on Stellar"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-sdk = "22.0.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
