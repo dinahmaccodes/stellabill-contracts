@@ -176,3 +176,112 @@ fn test_one_second_interval_boundary() {
     let sub = client.get_subscription(&id);
     assert_eq!(sub.last_payment_timestamp, T0 + 1);
 }
+
+// -- Usage-based charge tests ------------------------------------------------
+
+const PREPAID: i128 = 50_000_000; // 50 USDC
+
+/// Helper: create a subscription with `usage_enabled = true` and a known
+/// `prepaid_balance` by writing directly to storage after creation.
+fn setup_usage(env: &Env) -> (SubscriptionVaultClient, u32) {
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(env, &contract_id);
+
+    let token = Address::generate(env);
+    let admin = Address::generate(env);
+    client.init(&token, &admin);
+
+    let subscriber = Address::generate(env);
+    let merchant = Address::generate(env);
+
+    env.ledger().set_timestamp(T0);
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &10_000_000i128,
+        &INTERVAL,
+        &true, // usage_enabled
+    );
+
+    // Seed prepaid balance by writing the subscription back with funds.
+    let mut sub = client.get_subscription(&id);
+    sub.prepaid_balance = PREPAID;
+    env.as_contract(&contract_id, || {
+        env.storage().instance().set(&id, &sub);
+    });
+
+    (client, id)
+}
+
+/// Successful usage charge: debits prepaid_balance by the requested amount.
+#[test]
+fn test_usage_charge_debits_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, id) = setup_usage(&env);
+
+    client.charge_usage(&id, &10_000_000i128);
+
+    let sub = client.get_subscription(&id);
+    assert_eq!(sub.prepaid_balance, PREPAID - 10_000_000);
+    assert_eq!(sub.status, SubscriptionStatus::Active);
+}
+
+/// Draining the balance to zero transitions status to InsufficientBalance.
+#[test]
+fn test_usage_charge_drains_balance_to_insufficient() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, id) = setup_usage(&env);
+
+    client.charge_usage(&id, &PREPAID);
+
+    let sub = client.get_subscription(&id);
+    assert_eq!(sub.prepaid_balance, 0);
+    assert_eq!(sub.status, SubscriptionStatus::InsufficientBalance);
+}
+
+/// Rejected when usage_enabled is false.
+#[test]
+fn test_usage_charge_rejected_when_disabled() {
+    let env = Env::default();
+    env.mock_all_auths();
+    // Use the regular setup helper which creates usage_enabled = false.
+    let (client, id) = setup(&env, INTERVAL);
+
+    let res = client.try_charge_usage(&id, &1_000_000i128);
+    assert_eq!(res, Err(Ok(Error::UsageNotEnabled)));
+}
+
+/// Rejected when usage_amount exceeds prepaid_balance.
+#[test]
+fn test_usage_charge_rejected_insufficient_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, id) = setup_usage(&env);
+
+    let res = client.try_charge_usage(&id, &(PREPAID + 1));
+    assert_eq!(res, Err(Ok(Error::InsufficientPrepaidBalance)));
+
+    // Balance unchanged.
+    let sub = client.get_subscription(&id);
+    assert_eq!(sub.prepaid_balance, PREPAID);
+}
+
+/// Rejected when usage_amount is zero or negative.
+#[test]
+fn test_usage_charge_rejected_invalid_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, id) = setup_usage(&env);
+
+    let res_zero = client.try_charge_usage(&id, &0i128);
+    assert_eq!(res_zero, Err(Ok(Error::InvalidAmount)));
+
+    let res_neg = client.try_charge_usage(&id, &(-1i128));
+    assert_eq!(res_neg, Err(Ok(Error::InvalidAmount)));
+
+    // Balance unchanged.
+    let sub = client.get_subscription(&id);
+    assert_eq!(sub.prepaid_balance, PREPAID);
+}

@@ -12,6 +12,12 @@ pub enum Error {
     IntervalNotElapsed = 1001,
     /// Subscription is not Active (e.g. Paused, Cancelled).
     NotActive = 1002,
+    /// `charge_usage` called on a subscription with `usage_enabled = false`.
+    UsageNotEnabled = 1003,
+    /// Prepaid balance is too low to cover the requested debit.
+    InsufficientPrepaidBalance = 1004,
+    /// The supplied amount is not a positive value.
+    InvalidAmount = 1005,
 }
 
 #[contracttype]
@@ -120,6 +126,78 @@ impl SubscriptionVault {
         sub.last_payment_timestamp = now;
 
         // TODO: deduct sub.amount from sub.prepaid_balance, transfer to merchant
+
+        env.storage().instance().set(&subscription_id, &sub);
+        Ok(())
+    }
+
+    /// Charge a metered usage amount against the subscription's prepaid balance.
+    ///
+    /// Designed for integration with an **off-chain usage metering service**:
+    /// the service measures consumption, then calls this entrypoint with the
+    /// computed `usage_amount` to debit the subscriber's vault.
+    ///
+    /// # Requirements
+    ///
+    /// * The subscription must be `Active`.
+    /// * `usage_enabled` must be `true` on the subscription.
+    /// * `usage_amount` must be positive (`> 0`).
+    /// * `prepaid_balance` must be >= `usage_amount`.
+    ///
+    /// # Behaviour
+    ///
+    /// On success, `prepaid_balance` is reduced by `usage_amount`.  If the
+    /// debit drains the balance to zero the subscription transitions to
+    /// `InsufficientBalance` status, signalling that no further charges
+    /// (interval or usage) can proceed until the subscriber tops up.
+    ///
+    /// # Errors
+    ///
+    /// | Variant | Reason |
+    /// |---------|--------|
+    /// | `NotFound` | Subscription ID does not exist. |
+    /// | `NotActive` | Subscription is not `Active`. |
+    /// | `UsageNotEnabled` | `usage_enabled` is `false`. |
+    /// | `InvalidAmount` | `usage_amount` is zero or negative. |
+    /// | `InsufficientPrepaidBalance` | Prepaid balance cannot cover the debit. |
+    pub fn charge_usage(
+        env: Env,
+        subscription_id: u32,
+        usage_amount: i128,
+    ) -> Result<(), Error> {
+        // TODO: require_caller admin or authorized metering service
+
+        let mut sub: Subscription = env
+            .storage()
+            .instance()
+            .get(&subscription_id)
+            .ok_or(Error::NotFound)?;
+
+        if sub.status != SubscriptionStatus::Active {
+            return Err(Error::NotActive);
+        }
+
+        if !sub.usage_enabled {
+            return Err(Error::UsageNotEnabled);
+        }
+
+        if usage_amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        if sub.prepaid_balance < usage_amount {
+            return Err(Error::InsufficientPrepaidBalance);
+        }
+
+        sub.prepaid_balance -= usage_amount;
+
+        // If the vault is now empty, transition to InsufficientBalance so no
+        // further charges (interval or usage) can proceed until top-up.
+        if sub.prepaid_balance == 0 {
+            sub.status = SubscriptionStatus::InsufficientBalance;
+        }
+
+        // TODO: transfer usage_amount USDC to merchant
 
         env.storage().instance().set(&subscription_id, &sub);
         Ok(())
