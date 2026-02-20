@@ -1,6 +1,26 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Vec};
+
+/// Typed storage keys used throughout the contract.
+///
+/// Using an enum prevents key collisions and makes storage layout explicit and auditable.
+#[contracttype]
+pub enum DataKey {
+    /// Address of the token (USDC) used for billing.
+    Token,
+    /// Address of the contract administrator / billing engine.
+    Admin,
+    /// Monotonically increasing counter used to assign subscription IDs.
+    NextId,
+    /// Full [`Subscription`] record stored under its assigned `u32` ID.
+    Subscription(u32),
+    /// Per-subscriber index: maps an [`Address`] to the ordered list of subscription IDs it owns.
+    ///
+    /// Stored as `Vec<u32>`; items are appended in creation order, so the list is always
+    /// sorted ascending by ID.
+    SubscriberIndex(Address),
+}
 
 #[contracterror]
 #[repr(u32)]
@@ -31,6 +51,19 @@ pub struct Subscription {
     pub usage_enabled: bool,
 }
 
+/// A subscription record paired with its on-chain ID.
+///
+/// Returned by [`SubscriptionVault::get_subscriptions_by_subscriber`] so callers
+/// always know the ID without needing a separate lookup.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriptionEntry {
+    /// Unique, auto-assigned subscription ID (starts at 0, increments by 1).
+    pub id: u32,
+    /// Full subscription data.
+    pub subscription: Subscription,
+}
+
 #[contract]
 pub struct SubscriptionVault;
 
@@ -38,12 +71,15 @@ pub struct SubscriptionVault;
 impl SubscriptionVault {
     /// Initialize the contract (e.g. set token and admin). Extend as needed.
     pub fn init(env: Env, token: Address, admin: Address) -> Result<(), Error> {
-        env.storage().instance().set(&Symbol::new(&env, "token"), &token);
-        env.storage().instance().set(&Symbol::new(&env, "admin"), &admin);
+        env.storage().instance().set(&DataKey::Token, &token);
+        env.storage().instance().set(&DataKey::Admin, &admin);
         Ok(())
     }
 
     /// Create a new subscription. Caller deposits initial USDC; contract stores agreement.
+    ///
+    /// Also appends the new subscription ID to the subscriber's index so it is
+    /// discoverable via [`get_subscriptions_by_subscriber`].
     pub fn create_subscription(
         env: Env,
         subscriber: Address,
@@ -65,7 +101,18 @@ impl SubscriptionVault {
             usage_enabled,
         };
         let id = Self::_next_id(&env);
-        env.storage().instance().set(&id, &sub);
+        env.storage().instance().set(&DataKey::Subscription(id), &sub);
+
+        // Update subscriber → [subscription IDs] index.
+        let index_key = DataKey::SubscriberIndex(subscriber);
+        let mut ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&index_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        ids.push_back(id);
+        env.storage().instance().set(&index_key, &ids);
+
         Ok(id)
     }
 
@@ -124,18 +171,94 @@ impl SubscriptionVault {
         Ok(())
     }
 
-    /// Read subscription by id (for indexing and UI).
+    /// Read a single subscription by its ID.
     pub fn get_subscription(env: Env, subscription_id: u32) -> Result<Subscription, Error> {
         env.storage()
             .instance()
-            .get(&subscription_id)
+            .get(&DataKey::Subscription(subscription_id))
             .ok_or(Error::NotFound)
     }
 
+    /// Return a page of subscriptions owned by `subscriber`, ordered ascending by subscription ID.
+    ///
+    /// # Parameters
+    ///
+    /// | Name         | Description |
+    /// |--------------|-------------|
+    /// | `subscriber` | Address whose subscriptions to retrieve. |
+    /// | `start`      | Zero-based offset into the subscriber's full list (cursor for pagination). |
+    /// | `limit`      | Maximum entries to return. Pass `0` to retrieve **all** subscriptions. |
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<SubscriptionEntry>` in ascending ID order.
+    /// Returns an empty vec when the subscriber has no subscriptions or when `start`
+    /// is equal to or exceeds the subscriber's total subscription count.
+    ///
+    /// # Pagination strategy
+    ///
+    /// Use a simple cursor pattern:
+    /// 1. Call `get_subscriptions_by_subscriber(addr, 0, PAGE_SIZE)`.
+    /// 2. Record `next_start = start + result.len()`.
+    /// 3. If `result.len() < PAGE_SIZE` you have reached the end; otherwise repeat from step 1
+    ///    with the updated cursor.
+    ///
+    /// This pattern is safe when new subscriptions are added during iteration: because IDs are
+    /// monotonically increasing, entries that were already returned will never shift position in
+    /// the index.
+    ///
+    /// # Performance
+    ///
+    /// Performs **one** storage read to load the subscriber's ID list (`O(1)` key lookup), then
+    /// **one** storage read per returned entry (`O(limit)` total). The cost is independent of
+    /// the subscriber's total subscription count, making pagination cheap even for high-volume
+    /// subscribers.
+    pub fn get_subscriptions_by_subscriber(
+        env: Env,
+        subscriber: Address,
+        start: u32,
+        limit: u32,
+    ) -> Vec<SubscriptionEntry> {
+        let index_key = DataKey::SubscriberIndex(subscriber);
+        let ids: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&index_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = ids.len();
+        let start_idx = start.min(total);
+        let end_idx = if limit == 0 {
+            total
+        } else {
+            start.saturating_add(limit).min(total)
+        };
+
+        let mut result: Vec<SubscriptionEntry> = Vec::new(&env);
+        let mut i = start_idx;
+        while i < end_idx {
+            if let Some(sub_id) = ids.get(i) {
+                if let Some(sub) = env
+                    .storage()
+                    .instance()
+                    .get::<DataKey, Subscription>(&DataKey::Subscription(sub_id))
+                {
+                    result.push_back(SubscriptionEntry {
+                        id: sub_id,
+                        subscription: sub,
+                    });
+                }
+            }
+            i += 1;
+        }
+        result
+    }
+
+    // ─── internal helpers ────────────────────────────────────────────────────
+
     fn _next_id(env: &Env) -> u32 {
-        let key = Symbol::new(env, "next_id");
-        let id: u32 = env.storage().instance().get(&key).unwrap_or(0);
-        env.storage().instance().set(&key, &(id + 1));
+        let id: u32 = env.storage().instance().get(&DataKey::NextId).unwrap_or(0);
+        env.storage().instance().set(&DataKey::NextId, &(id + 1));
         id
     }
 }
