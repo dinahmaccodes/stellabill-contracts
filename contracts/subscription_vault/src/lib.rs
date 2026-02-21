@@ -83,8 +83,13 @@ impl SubscriptionVault {
     }
 
     /// Billing engine (backend) calls this to charge one interval. Deducts from vault, pays merchant.
-    pub fn charge_subscription(_env: Env, _subscription_id: u32) -> Result<(), Error> {
-        // TODO: require_caller admin or authorized billing service
+    ///
+    /// Only the authorized admin or billing engine address set during `init` can invoke this.
+    /// Fails with `Error::Unauthorized` if the caller is not the stored admin.
+    pub fn charge_subscription(env: Env, _subscription_id: u32) -> Result<(), Error> {
+        let admin: Address = env.storage().instance().get(&Symbol::new(&env, "admin")).ok_or(Error::Unauthorized)?;
+        admin.require_auth();
+
         // TODO: load subscription, check interval and balance, transfer to merchant, update last_payment_timestamp and prepaid_balance
         Ok(())
     }
