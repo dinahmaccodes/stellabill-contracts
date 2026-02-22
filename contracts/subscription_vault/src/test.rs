@@ -1,9 +1,14 @@
 use crate::{
-    can_transition, get_allowed_transitions, validate_status_transition, Error, Subscription,
-    SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient,
+    can_transition, get_allowed_transitions, validate_status_transition, Error, RecoveryReason,
+    Subscription, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient,
 };
-use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{Address, Env, IntoVal, Vec};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+use soroban_sdk::{Address, Env};
+
+/// Baseline creation timestamp used by test helpers.
+const T0: u64 = 1_000;
+/// Default billing interval for tests (30 days in seconds).
+const INTERVAL: u64 = 30 * 24 * 60 * 60;
 
 // =============================================================================
 // State Machine Helper Tests
@@ -611,11 +616,13 @@ fn test_min_topup_exactly_at_threshold() {
     let token = Address::generate(&env);
     let admin = Address::generate(&env);
     let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
     let min_topup = 5_000000i128; // 5 USDC
 
     client.init(&token, &admin, &min_topup);
+    let id = client.create_subscription(&subscriber, &merchant, &10_000000i128, &(30 * 24 * 60 * 60), &false);
 
-    let result = client.try_deposit_funds(&0, &subscriber, &min_topup);
+    let result = client.try_deposit_funds(&id, &subscriber, &min_topup);
     assert!(result.is_ok());
 }
 
@@ -629,11 +636,13 @@ fn test_min_topup_above_threshold() {
     let token = Address::generate(&env);
     let admin = Address::generate(&env);
     let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
     let min_topup = 5_000000i128; // 5 USDC
 
     client.init(&token, &admin, &min_topup);
+    let id = client.create_subscription(&subscriber, &merchant, &10_000000i128, &(30 * 24 * 60 * 60), &false);
 
-    let result = client.try_deposit_funds(&0, &subscriber, &10_000000);
+    let result = client.try_deposit_funds(&id, &subscriber, &10_000000);
     assert!(result.is_ok());
 }
 
@@ -659,6 +668,38 @@ fn test_set_min_topup_by_admin() {
 // -- Usage-based charge tests ------------------------------------------------
 
 const PREPAID: i128 = 50_000_000; // 50 USDC
+
+/// Helper: create a subscription with `usage_enabled = false` and a known
+/// `prepaid_balance` for interval-charge tests.
+fn setup(env: &Env, interval: u64) -> (SubscriptionVaultClient, u32) {
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(env, &contract_id);
+
+    let token = Address::generate(env);
+    let admin = Address::generate(env);
+    client.init(&token, &admin, &1_000000i128);
+
+    let subscriber = Address::generate(env);
+    let merchant = Address::generate(env);
+
+    env.ledger().set_timestamp(T0);
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &10_000_000i128,
+        &interval,
+        &false, // usage_enabled
+    );
+
+    // Seed prepaid balance.
+    let mut sub = client.get_subscription(&id);
+    sub.prepaid_balance = PREPAID;
+    env.as_contract(&contract_id, || {
+        env.storage().instance().set(&id, &sub);
+    });
+
+    (client, id)
+}
 
 /// Helper: create a subscription with `usage_enabled = true` and a known
 /// `prepaid_balance` by writing directly to storage after creation.
@@ -1058,6 +1099,7 @@ fn test_estimate_topup_subscription_not_found() {
     let result = client.try_estimate_topup_for_intervals(&9999, &1);
     assert_eq!(result, Err(Ok(Error::NotFound)));
 }
+#[test]
 fn test_get_next_charge_info_insufficient_balance_status() {
     use crate::SubscriptionStatus;
 
@@ -1217,7 +1259,7 @@ fn test_recover_stranded_funds_unauthorized_caller() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #405)")]
+#[should_panic(expected = "Error(Contract, #1008)")]
 fn test_recover_stranded_funds_zero_amount() {
     let (_, client, _, admin) = setup_test_env();
 
@@ -1230,7 +1272,7 @@ fn test_recover_stranded_funds_zero_amount() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #405)")]
+#[should_panic(expected = "Error(Contract, #1008)")]
 fn test_recover_stranded_funds_negative_amount() {
     let (_, client, _, admin) = setup_test_env();
 
