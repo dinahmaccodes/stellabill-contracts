@@ -243,33 +243,36 @@ impl SubscriptionVault {
 
     /// Billing engine (backend) calls this to charge one interval. Deducts from vault, pays merchant.
     ///
+    /// Only the authorized admin or billing engine address set during `init` can invoke this.
+    /// Fails with `Error::Unauthorized` if the caller is not the stored admin.
+    /// 
     /// # State Transitions
     /// - On success: `Active` -> `Active` (no change)
     /// - On insufficient balance: `Active` -> `InsufficientBalance`
     ///
     /// Subscriptions that are `Paused` or `Cancelled` cannot be charged.
     pub fn charge_subscription(env: Env, subscription_id: u32) -> Result<(), Error> {
-        // TODO: require_caller admin or authorized billing service
-        // TODO: load subscription, check interval and balance, transfer to merchant
+        let admin: Address = env.storage().instance().get(&Symbol::new(&env, "admin")).ok_or(Error::Unauthorized)?;
+        admin.require_auth();
 
         // Placeholder for actual charge logic
-        let maybe_sub: Option<Subscription> = env.storage().instance().get(&subscription_id);
-        if let Some(mut sub) = maybe_sub {
-            // Check current status allows charging
-            if sub.status == SubscriptionStatus::Cancelled || sub.status == SubscriptionStatus::Paused {
-                // Cannot charge cancelled or paused subscriptions
-                return Err(Error::InvalidStatusTransition);
-            }
+        let mut sub = Self::get_subscription(env.clone(), subscription_id)?;
 
-            // Simulate charge logic - on insufficient balance, transition to InsufficientBalance
-            let insufficient_balance = false; // TODO: actual balance check
-            if insufficient_balance {
-                validate_status_transition(&sub.status, &SubscriptionStatus::InsufficientBalance)?;
-                sub.status = SubscriptionStatus::InsufficientBalance;
-                env.storage().instance().set(&subscription_id, &sub);
-            }
-            // TODO: update last_payment_timestamp and prepaid_balance on successful charge
+        // Check current status allows charging
+        if sub.status == SubscriptionStatus::Cancelled || sub.status == SubscriptionStatus::Paused {
+            // Cannot charge cancelled or paused subscriptions
+            return Err(Error::InvalidStatusTransition);
         }
+
+        // Simulate charge logic - on insufficient balance, transition to InsufficientBalance
+        let insufficient_balance = false; // TODO: actual balance check
+        if insufficient_balance {
+            validate_status_transition(&sub.status, &SubscriptionStatus::InsufficientBalance)?;
+            sub.status = SubscriptionStatus::InsufficientBalance;
+            env.storage().instance().set(&subscription_id, &sub);
+        }
+        
+        // TODO: update last_payment_timestamp and prepaid_balance on successful charge
         Ok(())
     }
 

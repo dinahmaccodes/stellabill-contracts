@@ -3,7 +3,7 @@ use crate::{
     Subscription, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient,
 };
 use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{Address, Env, IntoVal};
 
 // =============================================================================
 // State Machine Helper Tests
@@ -128,7 +128,8 @@ fn setup_test_env() -> (Env, SubscriptionVaultClient<'static>, Address, Address)
     
     let token = Address::generate(&env);
     let admin = Address::generate(&env);
-    client.init(&token, &admin);
+    let min_topup = 1_000000i128; // 1 USDC
+    client.init(&token, &admin, &min_topup);
     
     (env, client, token, admin)
 }
@@ -181,6 +182,16 @@ fn test_pause_subscription_from_cancelled_should_fail() {
     
     // Then try to pause (should fail)
     client.pause_subscription(&id, &subscriber);
+}
+
+#[test]
+fn test_init_with_min_topup() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+    let token = Address::generate(&env);
+    let admin = Address::generate(&env);
     let min_topup = 1_000000i128; // 1 USDC
     client.init(&token, &admin, &min_topup);
     
@@ -586,6 +597,20 @@ fn test_one_second_interval_boundary() {
 #[test]
 fn test_init_and_struct() {
     let env = Env::default();
+    let sub = Subscription {
+        subscriber: Address::generate(&env),
+        merchant: Address::generate(&env),
+        amount: 10_000_0000,
+        interval_seconds: 30 * 24 * 60 * 60,
+        last_payment_timestamp: 0,
+        status: SubscriptionStatus::Active,
+        prepaid_balance: 50_000_0000,
+        usage_enabled: false,
+    };
+    assert_eq!(sub.status, SubscriptionStatus::Active);
+}
+
+#[test]
 fn test_min_topup_below_threshold() {
     let env = Env::default();
     env.mock_all_auths();
@@ -594,7 +619,6 @@ fn test_min_topup_below_threshold() {
 
     let token = Address::generate(&env);
     let admin = Address::generate(&env);
-    client.init(&token, &admin);
     let subscriber = Address::generate(&env);
     let min_topup = 5_000000i128; // 5 USDC
     
@@ -602,6 +626,93 @@ fn test_min_topup_below_threshold() {
     
     let result = client.try_deposit_funds(&0, &subscriber, &4_999999);
     assert!(result.is_err());
+}
+
+#[test]
+fn test_charge_subscription_auth() {
+    let env = Env::default();
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let token = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let min_topup = 1_000000i128;
+    client.init(&token, &admin, &min_topup);
+
+    // Test authorized call
+    env.mock_all_auths();
+
+    // Create a subscription so ID 0 exists
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.create_subscription(&subscriber, &merchant, &1000i128, &3600u64, &false);
+
+    client.charge_subscription(&0);
+}
+
+#[test]
+#[should_panic] // Soroban panic on require_auth failure
+fn test_charge_subscription_unauthorized() {
+    let env = Env::default();
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let token = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let min_topup = 1_000000i128;
+    client.init(&token, &admin, &min_topup);
+
+    // Create a subscription so ID 0 exists (using mock_all_auths for setup)
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    env.mock_all_auths();
+    client.create_subscription(&subscriber, &merchant, &1000i128, &3600u64, &false);
+
+    let non_admin = Address::generate(&env);
+
+    // Mock auth for the non_admin address
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &non_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "charge_subscription",
+            args: (0u32,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client.charge_subscription(&0);
+}
+
+#[test]
+fn test_charge_subscription_admin() {
+    let env = Env::default();
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let token = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let min_topup = 1_000000i128;
+    client.init(&token, &admin, &min_topup);
+
+    // Create a subscription so ID 0 exists (using mock_all_auths for setup)
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    env.mock_all_auths();
+    client.create_subscription(&subscriber, &merchant, &1000i128, &3600u64, &false);
+
+    // Mock auth for the admin address
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "charge_subscription",
+            args: (0u32,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client.charge_subscription(&0);
 }
 
 #[test]
