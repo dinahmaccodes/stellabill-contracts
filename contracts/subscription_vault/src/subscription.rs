@@ -39,11 +39,7 @@ pub fn do_create_subscription(
 
     // Maintain merchant → subscription-ID index
     let key = DataKey::MerchantSubs(sub.merchant.clone());
-    let mut ids: Vec<u32> = env
-        .storage()
-        .instance()
-        .get(&key)
-        .unwrap_or(Vec::new(env));
+    let mut ids: Vec<u32> = env.storage().instance().get(&key).unwrap_or(Vec::new(env));
     ids.push_back(id);
     env.storage().instance().set(&key, &ids);
 

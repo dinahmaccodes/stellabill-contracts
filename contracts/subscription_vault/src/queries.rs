@@ -52,15 +52,11 @@ pub fn get_subscriptions_by_merchant(
     limit: u32,
 ) -> Vec<Subscription> {
     let key = DataKey::MerchantSubs(merchant);
-    let ids: Vec<u32> = env
-        .storage()
-        .instance()
-        .get(&key)
-        .unwrap_or(Vec::new(&env));
+    let ids: Vec<u32> = env.storage().instance().get(&key).unwrap_or(Vec::new(env));
 
     let len = ids.len();
     if start >= len || limit == 0 {
-        return Vec::new(&env);
+        return Vec::new(env);
     }
 
     let end = if start + limit > len {
@@ -69,7 +65,7 @@ pub fn get_subscriptions_by_merchant(
         start + limit
     };
 
-    let mut result = Vec::new(&env);
+    let mut result = Vec::new(env);
     let mut i = start;
     while i < end {
         let sub_id = ids.get(i).unwrap();
@@ -86,10 +82,6 @@ pub fn get_subscriptions_by_merchant(
 /// Useful for dashboards and pagination metadata.
 pub fn get_merchant_subscription_count(env: &Env, merchant: Address) -> u32 {
     let key = DataKey::MerchantSubs(merchant);
-    let ids: Vec<u32> = env
-        .storage()
-        .instance()
-        .get(&key)
-        .unwrap_or(Vec::new(&env));
+    let ids: Vec<u32> = env.storage().instance().get(&key).unwrap_or(Vec::new(env));
     ids.len()
 }
